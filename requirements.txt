@@ -1,4 +1,4 @@
 instagrapi
 dropbox
-google-generativeai
+apscheduler
 python-dotenv
