@@ -1,0 +1,4 @@
+instagrapi
+dropbox
+google-generativeai
+python-dotenv
