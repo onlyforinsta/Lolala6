@@ -1,74 +1,87 @@
 
-import os, time, shutil
+import os
+import time
+import shutil
 import dropbox
+from apscheduler.schedulers.blocking import BlockingScheduler
 from instagrapi import Client
-import google.generativeai as genai
 from dotenv import load_dotenv
+import smtplib
+from email.message import EmailMessage
 
-# Load environment variables from .env file
+# Load env vars
 load_dotenv()
 
-# ENV VARIABLES
 DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
-DROPBOX_REELS_FOLDER = "/reels_queue"
-DROPBOX_UPLOADED_FOLDER = "/uploaded"
+DROPBOX_FOLDER = "/AutoUpload"
+LOCAL_TEMP_FOLDER = "temp"
+UPLOADED_FOLDER = "uploaded"
+
 INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME")
 INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+FIXED_CAPTION = "🔥 Auto-posted! #reels #trending"
 
-# Setup clients
-dbx = dropbox.Dropbox(DROPBOX_TOKEN)
-genai.configure(api_key=GEMINI_API_KEY)
-cl = Client()
-cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+EMAIL_TO = os.getenv("EMAIL_TO")
+EMAIL_FROM = os.getenv("EMAIL_FROM")
+EMAIL_PASS = os.getenv("EMAIL_PASS")  # Gmail app password
 
-# Temp folder
-TEMP_FOLDER = "downloads"
-os.makedirs(TEMP_FOLDER, exist_ok=True)
+os.makedirs(LOCAL_TEMP_FOLDER, exist_ok=True)
+os.makedirs(UPLOADED_FOLDER, exist_ok=True)
 
-def list_reels():
-    res = dbx.files_list_folder(DROPBOX_REELS_FOLDER)
-    return res.entries
-
-def download_from_dropbox(entry):
-    local_path = os.path.join(TEMP_FOLDER, entry.name)
-    with open(local_path, "wb") as f:
-        _, res = dbx.files_download(entry.path_lower)
-        f.write(res.content)
-    return local_path
-
-def move_to_uploaded(entry):
-    src = entry.path_lower
-    dst = f"{DROPBOX_UPLOADED_FOLDER}/{entry.name}"
-    dbx.files_move_v2(src, dst, allow_shared_folder=True, autorename=True)
-
-def generate_caption():
-    try:
-        model = genai.GenerativeModel("gemini-pro")
-        response = model.generate_content("Write a short, fun Instagram reel caption with 2 hashtags.")
-        return response.text.strip()
-    except Exception as e:
-        print("Gemini error:", e)
-        return "🔥 Auto-posted #reels #trending"
-
-def main():
-    files = list_reels()
-    if not files:
-        print("No video found in Dropbox.")
+def send_email_notification(subject, body):
+    if not EMAIL_TO or not EMAIL_FROM or not EMAIL_PASS:
+        print("📭 Email not configured. Skipping email.")
         return
-    video = files[0]
-    print("📥 Downloading:", video.name)
-    local_file = download_from_dropbox(video)
-    caption = generate_caption()
-    print("📤 Uploading to Instagram...")
     try:
-        cl.clip_upload(local_file, caption)
-        print("✅ Uploaded successfully!")
-        move_to_uploaded(video)
-    except Exception as e:
-        print("❌ Upload failed:", e)
-    finally:
-        os.remove(local_file)
+        msg = EmailMessage()
+        msg.set_content(body)
+        msg["Subject"] = subject
+        msg["From"] = EMAIL_FROM
+        msg["To"] = EMAIL_TO
 
-if __name__ == "__main__":
-    main()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(EMAIL_FROM, EMAIL_PASS)
+            smtp.send_message(msg)
+        print("📧 Notification sent.")
+    except Exception as e:
+        print("❌ Failed to send email:", e)
+
+def upload_reel():
+    dbx = dropbox.Dropbox(DROPBOX_TOKEN)
+    entries = dbx.files_list_folder(DROPBOX_FOLDER).entries
+
+    video_files = [e for e in entries if isinstance(e, dropbox.files.FileMetadata) and e.name.endswith(".mp4")]
+
+    if not video_files:
+        print("😴 No videos to upload.")
+        send_email_notification("Instagram Bot", "Boss, I am waiting for your orders 😎")
+        return
+
+    file = video_files[0]
+    local_path = os.path.join(LOCAL_TEMP_FOLDER, file.name)
+
+    with open(local_path, "wb") as f:
+        metadata, res = dbx.files_download(file.path_lower)
+        f.write(res.content)
+
+    print(f"📥 Downloaded: {file.name}")
+
+    try:
+        cl = Client()
+        cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+        cl.clip_upload(local_path, FIXED_CAPTION)
+        print(f"✅ Uploaded to Instagram: {file.name}")
+
+        dbx.files_move_v2(file.path_lower, f"/{UPLOADED_FOLDER}/{file.name}")
+        os.remove(local_path)
+
+    except Exception as e:
+        print(f"❌ Upload failed: {e}")
+
+# Scheduler
+scheduler = BlockingScheduler()
+scheduler.add_job(upload_reel, "interval", hours=10)
+
+print("🤖 Running every 10 hours...")
+upload_reel()  # Run once at start
+scheduler.start()
